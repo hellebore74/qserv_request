@@ -1,0 +1,33 @@
+
+
+####################################################################################################################################
+
+qservTest_case120_qserv is the qserv DB qserv corresponding to /sps/lsst/users/lsstprod/clusters/MACSJ2243.3-0935/output/coadd_dir
+
+####################################################################################################################################
+
+# Parameter names conversion file creation - not necessary for case120 db 
+python qserv_test_query.py --db qservTest_case120_qserv --conv --dataPath=/sps/lsst/users/lsstprod/clusters/MACSJ2243.3-0935/output/coadd_dir
+
+# Qserv db list
+python qserv_test_query.py --showdatabases
+
+#-----------------------------------------------------------------------------
+# For a given DB : in this case qservTest_case120_qserv 
+
+# Show table list
+python qserv_test_query.py --db qservTest_case120_qserv --showtables
+
+# Describe the structure of a given table
+python qserv_test_query.py --db qservTest_case120_qserv --request "describe deepCoadd_meas;"
+
+# Filter defined in deepCoadd_meas
+python qserv_test_query.py --db qservTest_case120_qserv --request "select distinct filter from deepCoadd_meas;"
+
+# Number of entries in a given table
+python qserv_test_query.py --db qservTest_case120_qserv --request "select count(*) from deepCoadd_meas;"
+python qserv_test_query.py --db qservTest_case120_qserv --request "select count(*) from deepCoadd_ref;"
+
+# Galaxies request as defined in qservi package
+python qserv_test_query.py --db qservTest_case120_qserv --galaxies
+...
