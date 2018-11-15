@@ -51,13 +51,13 @@ class QservQuery:
         except:
             return request,None
         if tmp_low[iSelect+1]=="distinct": iSelect+=1
-        iDbName=tmp_low.index("from")
+        iTableName=tmp_low.index("from")
 
         tmp_request=[x for x in request.split(" ") if x!=""]
         paramNames=tmp_request[iSelect+1]
-        dbName=tmp_request[iDbName+1]
-        if dbName.endswith(";"): dbName=dbName[:-1]
-        if not paramNames[0]=='[': return request,dbName
+        tableName=tmp_request[iTableName+1]
+        if tableName.endswith(";"): tableName=tableName[:-1]
+        if not paramNames[0]=='[': return request,tableName
 
         # Define parameter name pattern list 
         patternList=[x for x in paramNames[1:-1].split(",") if x!=""]
@@ -67,7 +67,7 @@ class QservQuery:
         for p in patternList:
             p=p.replace("*","\w+")
             if not p[-1]=="*": p=p+"$"
-            tmp=[x for x in self.paramNameConvDict[dbName] if re.match(p,x)]
+            tmp=[x for x in self.paramNameConvDict[tableName] if re.match(p,x)]
             paramList.extend(tmp)
 
         # Update db request
@@ -76,10 +76,10 @@ class QservQuery:
         paramNames=paramNames.replace("'","")
         tmp_request[iSelect+1]=paramNames
 
-        return " ".join(tmp_request),dbName
+        return " ".join(tmp_request),tableName
 
 
-    def replace_select_by_shortnames(self,input_request,dbName):
+    def replace_select_by_shortnames(self,input_request,tableName):
 
         tmp_low=[x.lower() for x in input_request.split(" ") if x!=""]
         try:
@@ -89,8 +89,8 @@ class QservQuery:
         
         # replaces parameter names by shorten parameter names starting
         #       with the longest parameter name
-        for k in sorted(self.paramNameConvDict[dbName], key=len, reverse=True):
-            input_request=input_request.replace(k,self.paramNameConvDict[dbName][k])
+        for k in sorted(self.paramNameConvDict[tableName], key=len, reverse=True):
+            input_request=input_request.replace(k,self.paramNameConvDict[tableName][k])
 
         return input_request
 
@@ -99,14 +99,15 @@ class QservQuery:
 
         # Check if select --- from requets section contains wildcards
         request_init=request
-        dbName=None
+        tableName=None
         
         if self.paramNameConvDict:        
-            request,dbName=self.replace_select_from_wildcards(request_init)
+            request,tableName=self.replace_select_from_wildcards(request_init)
             print("wildcards : ",request)
+            print("table name : ",tableName)
 
             # Replace parameter names by shorten names
-            request=self.replace_select_by_shortnames(request,dbName)
+            request=self.replace_select_by_shortnames(request,tableName)
             print("short names : ",request)
             
         if not request.endswith(";"): request+=";"
@@ -127,20 +128,61 @@ class QservQuery:
         if exitcode!=0: print(res,"\nExitCode : ",exitcode)
         if exitcode!=0: return
 
+        # Get data types
+        dataTypeConverter={}
+        if tableName: 
+            request="show fields from %s"%tableName
+            cmd='%s %s -e "%s"'%(self.mysqlCommand,self.dbName,request)
+            print(cmd)
+            p=subprocess.Popen(cmd, shell=True,stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            res_type,err_type=p.communicate()
+            if err_type: print("Error : ",err_type)
+            exitcode_type=p.returncode
+            if exitcode_type!=0: print(res,"\nExitCode : ",exitcode_type)
+            if exitcode_type!=0: return
+
+            resTmp=res_type.decode("ascii")
+            lines=[x for x in resTmp.split("\n") if x!=""]
+            for l in lines[1:]:
+                tmp=[x for x in l.split("\t") if x!=""]
+                name,dType=tmp[0:2]
+                if dType=="tinyint(1)":
+                    dataTypeConverter[tmp[0]]=bool
+                elif "float" in dType or "double" in dType:
+                    dataTypeConverter[tmp[0]]=float
+                elif "int" in dType:
+                    dataTypeConverter[tmp[0]]=int
+                elif "char" in dType:
+                    dataTypeConverter[tmp[0]]=str
+                else:
+                    print("UNDEFINED mysl data type : ",name," ",dType)
+                    sys.exit()
+                    
+
+        # Decode request output
         resTmp=res.decode("ascii")
 
         # Extract parameter names and row values
         lines=[x for x in resTmp.split("\n") if x!=""]
         paramNames=[x for x in lines[0].split("\t") if x!=""]
         paramValueList=[]
-        for l in lines[1:]:
-            vList=[x.strip() for x in l.split("\t")]
+        for i,l in enumerate(lines[1:]):
+            if dataTypeConverter:
+                vList=[]
+                for j,x in enumerate(l.split("\t")):
+                    if paramNames[j] in dataTypeConverter : vList.append(dataTypeConverter[paramNames[j]](x.strip()))
+                    else: vList.append(x.strip())
+
+            else:
+                vList=[x.strip() for x in l.split("\t")]
             paramValueList.append(tuple(vList))
+#            if i==0:
+#                for v in vList: print(v," ",type(v))
 
         # Replace shorten parameter names by real names
         paramNames_real=[]
-        if self.paramNameConvDict and dbName:
-            inv_names = {v: k for k, v in self.paramNameConvDict[dbName].items()}        
+        if self.paramNameConvDict and tableName:
+            inv_names = {v: k for k, v in self.paramNameConvDict[tableName].items()}        
             for p in paramNames:
                 if p in inv_names:
                     paramNames_real.append(inv_names[p])
@@ -148,11 +190,17 @@ class QservQuery:
                     paramNames_real.append(p)
         else:
             paramNames_real=paramNames
-        
-        print(paramNames)
-        print(paramNames_real)
 
-        return paramNames_real,paramValueList
+        
+        paramTypeList=[]
+        for j,x in enumerate(paramNames):
+            if x in dataTypeConverter : paramTypeList.append(dataTypeConverter[x].__name__)
+        
+#       print(paramNames)
+#       print(paramNames_real)
+#       print(paramTypeList)
+
+        return paramNames_real,paramValueList,paramTypeList
 
 
     def query(self, sqlquery, save=True, verbose=False):
@@ -160,14 +208,18 @@ class QservQuery:
         if verbose:
             print("Current query is")
             print("  ", sqlquery)
-        paramNames,paramValueList=self.execute_request(sqlquery)
+        paramNames,paramValueList,paramTypeList=self.execute_request(sqlquery)
         if verbose:
             print("INFO: %i rows found for this query" % len(paramValueList))
 
         # Build astropy tables
         columns_name = np.array(paramNames)
         columns_value = np.array(paramValueList)
-        result = Table(columns_value, names=columns_name)
+        if len(paramTypeList)==0:
+            result = Table(columns_value, names=columns_name)
+        else:
+            columns_dtype = np.array(paramTypeList)
+            result = Table(columns_value, names=columns_name, dtype=columns_dtype)
 
         if save:
             query = {"sqlquery": sqlquery, "output": result}
@@ -226,6 +278,7 @@ class QservQueryCatalogs(QservQuery):
     def request(self,request):
         
         res=self.query(request)
+        print(res.info)
         print(res)
         
     def select_galaxies(self):
@@ -263,7 +316,10 @@ class QservQueryCatalogs(QservQuery):
         tab_forced_src.rename_column("objectId","id")
         tab_all= join(tab_meas,tab_forced_src,keys=("id","filter"))
 
+        
+        print(tab_all.info)
         print(tab_all)
+
 
         return tab_all
 
