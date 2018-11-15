@@ -89,8 +89,9 @@ class QservQuery:
         
         # replaces parameter names by shorten parameter names starting
         #       with the longest parameter name
-        for k in sorted(self.paramNameConvDict[tableName], key=len, reverse=True):
-            input_request=input_request.replace(k,self.paramNameConvDict[tableName][k])
+        if tableName in self.paramNameConvDict:
+            for k in sorted(self.paramNameConvDict[tableName], key=len, reverse=True):
+                input_request=input_request.replace(k,self.paramNameConvDict[tableName][k])
 
         return input_request
 
@@ -181,7 +182,7 @@ class QservQuery:
 
         # Replace shorten parameter names by real names
         paramNames_real=[]
-        if self.paramNameConvDict and tableName:
+        if self.paramNameConvDict and tableName and tableName in self.paramNameConvDict:
             inv_names = {v: k for k, v in self.paramNameConvDict[tableName].items()}        
             for p in paramNames:
                 if p in inv_names:
