@@ -164,6 +164,8 @@ class QservQuery:
         reqDict["patternList_init"]=patternList_init
         reqDict["tables"]=tableNames
 
+        iSelect=reqDict["request_init"].lower().find("select")+len("select")+1
+        iFrom=reqDict["request_init"].lower().find("from")
         new_request=reqDict["request_init"][:iSelect]+",".join(paramList_new)+" "+reqDict["request_init"][iFrom:]
 
         if whereRequest:
@@ -179,7 +181,6 @@ class QservQuery:
         import pprint
         pprint.pprint(reqDict)
         print("FINAL request : ",reqDict["request"])
-
         
         return reqDict
         
@@ -485,7 +486,7 @@ class QservQueryCatalogs(QservQuery):
 #        print(tab_meas)
 
 
-        query = "SELECT dm.id,dm.filter,dm.modelfit_CModel_mag,fs.modelfit_CModel_mag "
+        query = "SELECT dm.id, dm.filter, dm.modelfit_CModel_mag, fs.modelfit_CModel_mag "
         query += "FROM deepCoadd_meas as dm,"
         query += "deepCoadd_forced_src as fs " 
         query += "WHERE dm.id=fs.objectId and dm.filter='r'"
