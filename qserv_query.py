@@ -6,6 +6,8 @@ import sys
 import subprocess
 import re
 import numpy as np
+import collections
+
 from astropy.table import Table, join
 
 class QservQuery:
@@ -42,25 +44,147 @@ class QservQuery:
         return
 
 
-    def replace_select_from_wildcards(self,request):
+    def analyze_request(self,request):
+
+        reqDict={}
+        reqDict["request_init"]=request[:]
+        reqDict["request"]=request[:]
+        reqDict["paramList_init"]=None
+        reqDict["paramList"]=None
+        reqDict["paramList_comp"]=None
+        reqDict["patternList_init"]=None
+        reqDict["tables"]=None
+
+        input_request="%s"%request
+        
+        # Try to remove unecessary whitespaces
+        patternList=[(", ",","),("\n"," "),("\t"," "),("   "," "),("  "," ")]
+        for p in patternList:
+            old,new=p
+            input_request=input_request.replace(old,new)
+
+        #Add semicolon
+        if not input_request.endswith(";"): input_request=input_request+";"
+        print("input : ",input_request)
+        
+        request_low=input_request.lower()
+        print(request_low)
 
         # Extract parameter list and db name
-        tmp_low=[x.lower() for x in request.split(" ") if x!=""]
+        iSelect=None
         try:
-            iSelect=tmp_low.index("select")
+            iSelect=request_low.index("select")
         except:
-            return request,None
-        if tmp_low[iSelect+1]=="distinct": iSelect+=1
-        iTableName=tmp_low.index("from")
+            pass
 
-        tmp_request=[x for x in request.split(" ") if x!=""]
-        paramNames=tmp_request[iSelect+1]
-        tableName=tmp_request[iTableName+1]
-        if tableName.endswith(";"): tableName=tableName[:-1]
-        if not paramNames[0]=='[': return request,tableName
+        print("iSelect : ",iSelect)
+        if iSelect==None:
+            import pprint
+            pprint.pprint(reqDict)
+            return reqDict
 
-        # Define parameter name pattern list 
-        patternList=[x for x in paramNames[1:-1].split(",") if x!=""]
+        # Column list 
+        iFrom=request_low.index("from")
+        paramNames=(input_request[iSelect+len("select"):iFrom]).strip()
+        if paramNames.lower().startswith("distinct"):
+            paramNames=paramNames[len("distinct"):].strip()
+            iSelect=iSelect+len("distinct")+1
+        iSelect+=len("select ")
+
+        print("param names : ",paramNames)
+        paramList_init=None
+        patternList_init=None
+        if paramNames.startswith("["):
+            patternList_init=tuple(x.strip() for x in paramNames[1:-1].split(",") if x!="")
+        else:
+            paramList_init=tuple(x.strip() for x in paramNames.split(",") if x!="")
+        print("param list : ",paramList_init)
+        print("pattern list : ",patternList_init)
+
+        # Table names
+        iWhere=None
+        try:
+            iWhere=request_low.index("where")        
+        except:
+            pass
+        if iWhere==None: iWhere=len(input_request)
+        tableInput=(input_request[iFrom+len("from"):iWhere]).strip()
+        if tableInput.endswith(";"): tableInput=tableInput[:-1]
+        print("table names : ",tableInput)
+        tmp=[x.strip() for x in tableInput.split(",") if x!=""]
+        tableNames={}
+        for name in tmp:
+            if not " as " in name.lower():
+                tableNames[name]=name
+            else:
+                if " as " in name: name_db,alias_name=[x for x in name.split(" as ") if x!=""]
+                else : name_db,alias_name=[x for x in name.split(" AS ") if x!=""]
+                tableNames[name_db]=alias_name
+        print("table names : ",tableNames)
+        inv_tableNames = {v: k for k, v in tableNames.items()}
+
+        # Where constraint
+        whereRequest=None
+        if iWhere<len(input_request):
+            whereRequest=self.where_replace_columnnames_by_shortnames(input_request[iWhere:],tableNames)
+            
+        # Final param list 
+        paramList=[]
+        if paramList_init:
+            for p in paramList_init:
+                if p.lower() in ["*","count(*)"]:
+                    paramList.append((p,list(tableNames.keys())[0],False,p))                
+                elif not "." in p :
+                    paramList.append((p,list(tableNames.keys())[0],False,p))
+                else:
+                    table,name=[x for x in p.split(".") if x!=""]
+                    paramList.append((name,inv_tableNames[table],True,name))
+        print("param list - normal : ",paramList)
+        
+        # Pattern list 
+        if patternList_init:
+            tableName=list(tableNames.keys())[0]
+            pList=self.replace_pattern_wildcards(patternList_init,tableName)
+            paramList=[(p,tableName,False,p) for p in pList]
+            
+        print("param list - pattern : ",paramList)
+
+        # Replace column names by shorten column names
+        paramList_short=self.replace_columnnames_by_shortnames(paramList,tableNames)
+        print("param list - short : ",paramList_short)        
+        
+        # Check for dupplicate column names
+        paramList_new,paramList_comp=self.check_for_column_duplicates(paramList_short,tableNames)
+        print("param list - dupplicates : ",paramList_new)
+
+        # Constraints
+        reqDict["paramList_init"]=paramList_init
+        reqDict["paramList_comp"]=paramList_comp
+        reqDict["paramList"]=paramList_new
+        reqDict["patternList_init"]=patternList_init
+        reqDict["tables"]=tableNames
+
+        new_request=reqDict["request_init"][:iSelect]+",".join(paramList_new)+" "+reqDict["request_init"][iFrom:]
+
+        if whereRequest:
+            iWhere=new_request.lower().find("where")
+            new_request=new_request[:iWhere]+whereRequest.strip()
+
+        if "where and" in new_request.lower():
+            ipos=new_request.lower().find("where and")
+            new_request=new_request[:ipos]+" WHERE "+new_request[ipos+len("where and"):]
+
+        reqDict["request"]=new_request
+        if not reqDict["request"].endswith(";"):reqDict["request"]=reqDict["request"]+";"
+        import pprint
+        pprint.pprint(reqDict)
+        print("FINAL request : ",reqDict["request"])
+
+        
+        return reqDict
+        
+
+    def replace_pattern_wildcards(self,patternList,tableName):
 
         # Get parameter names corresponding to the patterns defined above
         paramList=[]
@@ -69,50 +193,87 @@ class QservQuery:
             if not p[-1]=="*": p=p+"$"
             tmp=[x for x in self.paramNameConvDict[tableName] if re.match(p,x)]
             paramList.extend(tmp)
-
+        print("param list : ",paramList)
+        
         # Update db request
-        paramList=list(set(paramList))
-        paramNames=",".join(paramList)
-        paramNames=paramNames.replace("'","")
-        tmp_request[iSelect+1]=paramNames
+        from collections import OrderedDict
+        paramList=list(OrderedDict.fromkeys(paramList))
 
-        return " ".join(tmp_request),tableName
+        return paramList
 
 
-    def replace_select_by_shortnames(self,input_request,tableName):
+    def check_for_column_duplicates(self,paramList_input,tableNames):
 
-        tmp_low=[x.lower() for x in input_request.split(" ") if x!=""]
-        try:
-            iSelect=tmp_low.index("select")
-        except:
-            return input_request
+        columnNames=[x for x,v,b,a in paramList_input]
+        print("Columns : ",columnNames)
+        print("Table names : ",tableNames)
+        counter=collections.Counter(columnNames)
+        
+        paramList_new=paramList_input[:]
+        paramList_comp=paramList_input[:]
+        for i,p in enumerate(paramList_input):
+            pName,tableName_real,bDot,pAlias=p
+            tableName=tableNames[tableName_real]
+            if not bDot:
+                paramList_new[i]=pName
+            else:
+                if counter[pName]==1:
+                    paramList_new[i]="%s.%s"%(tableName,pName)
+                else:
+                    paramList_new[i]="%s.%s as %s_%s"%(tableName,pName,tableName,pName)
+                    paramList_comp[i]=(pName,tableName_real,bDot,"%s_%s"%(tableName,pName))
+
+        return paramList_new,paramList_comp
+
+
+    def replace_columnnames_by_shortnames(self,paramList_input,tableNames):
+
+        if self.paramNameConvDict==None:
+            return paramList_input
         
         # replaces parameter names by shorten parameter names starting
         #       with the longest parameter name
-        if tableName in self.paramNameConvDict:
-            for k in sorted(self.paramNameConvDict[tableName], key=len, reverse=True):
-                input_request=input_request.replace(k,self.paramNameConvDict[tableName][k])
+        paramList_new=[]
+        for pName,tableName,bDot,pAlias in paramList_input:
+            if tableName in self.paramNameConvDict:
+                if pName in self.paramNameConvDict[tableName]:
+                    pName=self.paramNameConvDict[tableName][pName]
+            paramList_new.append((pName,tableName,bDot,pAlias))
+                    
+        return paramList_new
 
-        return input_request
 
+    def where_replace_columnnames_by_shortnames(self,whereReq,tableNames):
+
+        inv_names = {v: k for k, v in tableNames.items()}                
+        print(inv_names)
+        reqTmp=re.split('(\W+)', whereReq)
+        print("WHERE : ",reqTmp)
+        reqTmp_new=reqTmp[:]
+        for i,t in enumerate(reqTmp):
+            if t!=".": continue
+            tableName=reqTmp[i-1]
+            if tableName in inv_names:
+                tableName=inv_names[tableName]
+                pName=reqTmp[i+1]
+                if tableName in self.paramNameConvDict:
+                    if pName in self.paramNameConvDict[tableName]:
+                        pName=self.paramNameConvDict[tableName][pName]
+                reqTmp_new[i+1]=pName
+
+#        print("".join(reqTmp_new))
+        return "".join(reqTmp_new)
 
     def execute_request(self,request):
 
         # Check if select --- from requets section contains wildcards
         request_init=request
-        tableName=None
+
+        requestDict=self.analyze_request(request)
+        request=requestDict["request"]
+        tableNameDict=requestDict["tables"]
+        paramComp=requestDict["paramList_comp"]
         
-        if self.paramNameConvDict:        
-            request,tableName=self.replace_select_from_wildcards(request_init)
-            print("wildcards : ",request)
-            print("table name : ",tableName)
-
-            # Replace parameter names by shorten names
-            request=self.replace_select_by_shortnames(request,tableName)
-            print("short names : ",request)
-            
-        if not request.endswith(";"): request+=";"
-
         # Final request
         if self.dbName: 
             cmd='%s %s -e "%s"'%(self.mysqlCommand,self.dbName,request)
@@ -123,56 +284,80 @@ class QservQuery:
         print(cmd)
         p=subprocess.Popen(cmd, shell=True,stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         res,err=p.communicate()
+        print("res/err : ",err)
         if err: print("Error : ",err)
 
         exitcode=p.returncode
         if exitcode!=0: print(res,"\nExitCode : ",exitcode)
-        if exitcode!=0: return
+        if exitcode!=0: return [],[],[]
 
         # Get data types
         dataTypeConverter={}
-        if tableName: 
-            request="show fields from %s"%tableName
-            cmd='%s %s -e "%s"'%(self.mysqlCommand,self.dbName,request)
-            print(cmd)
-            p=subprocess.Popen(cmd, shell=True,stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            res_type,err_type=p.communicate()
-            if err_type: print("Error : ",err_type)
-            exitcode_type=p.returncode
-            if exitcode_type!=0: print(res,"\nExitCode : ",exitcode_type)
-            if exitcode_type!=0: return
+        if tableNameDict:
+            for tableName in tableNameDict:
+                dataTypeConverter[tableName]={}
+                request="show fields from %s"%tableName
+                cmd='%s %s -e "%s"'%(self.mysqlCommand,self.dbName,request)
+                print(cmd)
+                p=subprocess.Popen(cmd, shell=True,stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                res_type,err_type=p.communicate()
+                if err_type: print("Error : ",err_type)
+                exitcode_type=p.returncode
+                if exitcode_type!=0: print(res,"\nExitCode : ",exitcode_type)
+                if exitcode_type!=0: return
 
-            resTmp=res_type.decode("ascii")
-            lines=[x for x in resTmp.split("\n") if x!=""]
-            for l in lines[1:]:
-                tmp=[x for x in l.split("\t") if x!=""]
-                name,dType=tmp[0:2]
-                if dType=="tinyint(1)":
-                    dataTypeConverter[tmp[0]]=bool
-                elif "float" in dType or "double" in dType:
-                    dataTypeConverter[tmp[0]]=float
-                elif "int" in dType:
-                    dataTypeConverter[tmp[0]]=int
-                elif "char" in dType:
-                    dataTypeConverter[tmp[0]]=str
-                else:
-                    print("UNDEFINED mysl data type : ",name," ",dType)
-                    sys.exit()
+                resTmp=res_type.decode("ascii")
+                lines=[x for x in resTmp.split("\n") if x!=""]
+                for l in lines[1:]:
+                    tmp=[x for x in l.split("\t") if x!=""]
+                    name,dType=tmp[0:2]
+                    if dType=="tinyint(1)":
+                        dataTypeConverter[tableName][tmp[0]]=bool
+                    elif "float" in dType or "double" in dType:
+                        dataTypeConverter[tableName][tmp[0]]=float
+                    elif "int" in dType:
+                        dataTypeConverter[tableName][tmp[0]]=int
+                    elif "char" in dType:
+                        dataTypeConverter[tableName][tmp[0]]=str
+                    else:
+                        print("UNDEFINED mysl data type : ",name," ",dType)
+                        sys.exit()
+
+#            print(dataTypeConverter)
                     
 
         # Decode request output
         resTmp=res.decode("ascii")
+        if len(resTmp)==0:
+            return [],[],[]
 
         # Extract parameter names and row values
         lines=[x for x in resTmp.split("\n") if x!=""]
         paramNames=[x for x in lines[0].split("\t") if x!=""]
+        print(paramNames)
+        paramTables=[]
+        if paramComp:
+            for p in paramNames:
+                tmp=[(x[1],x[0]) for x in paramComp if x[-1]==p]
+                if len(tmp)>0: paramTables.append(tmp[0])
+                else: paramTables.append((list(tableNameDict.keys())[0],p))
+        print(paramTables)
+
+##        print("dataTypeConverter")
+##        print(dataTypeConverter.keys())
+##        for key in dataTypeConverter:
+##            print(dataTypeConverter[key].keys())
+
         paramValueList=[]
         for i,l in enumerate(lines[1:]):
             if dataTypeConverter:
                 vList=[]
                 for j,x in enumerate(l.split("\t")):
-                    if paramNames[j] in dataTypeConverter : vList.append(dataTypeConverter[paramNames[j]](x.strip()))
-                    else: vList.append(x.strip())
+                    pTable,pName=paramTables[j]
+                    if pTable in dataTypeConverter and pName in dataTypeConverter[pTable]:
+                        vList.append(dataTypeConverter[pTable][pName](x.strip()))
+                    else:
+                        vList.append(x.strip())
 
             else:
                 vList=[x.strip() for x in l.split("\t")]
@@ -181,25 +366,27 @@ class QservQuery:
 #                for v in vList: print(v," ",type(v))
 
         # Replace shorten parameter names by real names
-        paramNames_real=[]
-        if self.paramNameConvDict and tableName and tableName in self.paramNameConvDict:
-            inv_names = {v: k for k, v in self.paramNameConvDict[tableName].items()}        
-            for p in paramNames:
-                if p in inv_names:
-                    paramNames_real.append(inv_names[p])
-                else:
-                    paramNames_real.append(p)
-        else:
-            paramNames_real=paramNames
-
+        paramNames_real=paramNames[:]
+        if self.paramNameConvDict and tableNameDict:
+            for tableName in tableNameDict:
+                inv_names = {v: k for k, v in self.paramNameConvDict[tableName].items()}        
+                for i,p in enumerate(paramNames):
+                    if paramTables[i][0]==tableName:
+                        if p in inv_names:
+                            paramNames_real[i]=(inv_names[paramTables[i][1]])
         
         paramTypeList=[]
-        for j,x in enumerate(paramNames):
-            if x in dataTypeConverter : paramTypeList.append(dataTypeConverter[x].__name__)
+        if dataTypeConverter:
+            for j,x in enumerate(paramNames):
+                pTable,pName=paramTables[j]
+                if pTable in dataTypeConverter and pName in dataTypeConverter[pTable]:
+                    paramTypeList.append(dataTypeConverter[pTable][pName].__name__)
+                else:
+                    paramTypeList.append("str")
         
-#       print(paramNames)
-#       print(paramNames_real)
-#       print(paramTypeList)
+        print("Names : ",paramNames)
+        print("Names - real : ",paramNames_real)
+        print("Types : ",paramTypeList)
 
         return paramNames_real,paramValueList,paramTypeList
 
@@ -212,6 +399,10 @@ class QservQuery:
         paramNames,paramValueList,paramTypeList=self.execute_request(sqlquery)
         if verbose:
             print("INFO: %i rows found for this query" % len(paramValueList))
+
+        # The requests returned no values
+        if len(paramNames)+len(paramValueList)+len(paramTypeList)==0:
+            return None
 
         # Build astropy tables
         columns_name = np.array(paramNames)
@@ -279,7 +470,7 @@ class QservQueryCatalogs(QservQuery):
     def request(self,request):
         
         res=self.query(request)
-        print(res.info)
+        if res: print(res.info)
         print(res)
         
     def select_galaxies(self):
@@ -288,6 +479,20 @@ class QservQueryCatalogs(QservQuery):
 #        filters = self.query("SELECT distinct filter FROM deepCoadd_meas;")
 #        print(filters)
 #        nfilt = len(filters)
+
+#        query = "SELECT [id, detect_isPrimary] FROM deepCoadd_meas as dm"
+#        tab_meas=self.query(query, verbose=True)
+#        print(tab_meas)
+
+
+        query = "SELECT dm.id,dm.filter,dm.modelfit_CModel_mag,fs.modelfit_CModel_mag "
+        query += "FROM deepCoadd_meas as dm,"
+        query += "deepCoadd_forced_src as fs " 
+        query += "WHERE dm.id=fs.objectId and dm.filter='r'"
+        tab_meas=self.query(query, verbose=True)
+        print(tab_meas.info)
+        print(tab_meas)
+        return tab_meas
 
         # == Filter the deepCoadd catalogs
 
@@ -321,63 +526,5 @@ class QservQueryCatalogs(QservQuery):
         print(tab_all.info)
         print(tab_all)
 
-
         return tab_all
 
-        
-##         query = "SELECT * FROM deepCoadd_meas AS dm, deepCoadd_forced_src AS dfs WHERE dm.id=dfs.objectId "
-## #        query = "SELECT * FROM deepCoadd_meas AS dm, deepCoadd_forced_src AS dfs WHERE dm.deepCoadd_ref_fkId=dfs.deepCoadd_ref_fkId "
-##         # Select galaxies (and reject stars)
-##         # keep galaxy
-##         query += "AND dm.base_ClassificationExtendedness_flag=0 "
-##         #filt = cats['deepCoadd_meas']['base_ClassificationExtendedness_flag'] == 0
-
-##         # keep galaxy
-##         query += "AND dm.base_ClassificationExtendedness_value >= 0.5 "
-##         #filt &= cats['deepCoadd_meas']['base_ClassificationExtendedness_value'] >= 0.
-
-##         # Gauss regulerarization flag
-##         query += "AND dm.ext_shapeHSM_HsmShapeRegauss_flag=0 "
-##         #filt &= cats['deepCoadd_meas']['ext_shapeHSM_HsmShapeRegauss_flag'] == 0
-
-##         # Make sure to keep primary sources
-##         query += "AND dm.detect_isPrimary=1 "
-##         #filt &= cats['deepCoadd_meas']['detect_isPrimary'] == 1
-
-##         # Check the flux value, which must be > 0
-##         query += "AND dfs.modelfit_CModel_flux>0 "
-##         #filt &= cats['deepCoadd_forced_src']['modelfit_CModel_flux'] > 0
-
-##         # Select sources which have a proper flux value
-##         query += "AND dfs.modelfit_CModel_flag=0 "
-##         #filt &= cats['deepCoadd_forced_src']['modelfit_CModel_flag'] == 0
-
-##         # Check the signal to noise (stn) value, which must be > 10
-##         query += "AND (dfs.modelfit_CModel_flux/dfs.modelfit_CModel_fluxSigma)>10 "
-##         #filt &= (cats['deepCoadd_forced_src']['modelfit_CModel_flux'] /
-##         #         cats['deepCoadd_forced_src']['modelfit_CModel_fluxSigma']) > 10
-
-
-##        return res
-
- #
- ## == Only keeps sources with the 'nfilt' filters
- #dmg = cats['deepCoadd_meas'][filt].group_by('id')
- #dfg = cats['deepCoadd_forced_src'][filt].group_by(
- #    'id' if 'id' in cats['deepCoadd_forced_src'].keys() else 'objectId')
- #
- ## Indices difference is a quick way to get the lenght of each group
- #filt = (dmg.groups.indices[1:] - dmg.groups.indices[:-1]) == nfilt
- #
- #output = {'deepCoadd_meas': dmg.groups[filt],
- #          'deepCoadd_forced_src': dfg.groups[filt], 'wcs': cats['wcs']}
- #
- ## == Filter the forced_src catalog: only keep objects present in the other catalogs
- #if "forced_src" not in cats.keys():
- #    return output
- #
- #filt = np.where(np.in1d(cats['forced_src']['objectId'],
- #                        output['deepCoadd_meas']['id']))[0]
- #output['forced_src'] = cats['forced_src'][filt]
- #
- #return output
